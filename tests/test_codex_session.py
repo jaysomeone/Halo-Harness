@@ -161,6 +161,8 @@ def test_second_turn_resumes_same_thread(ctx: Ctx):
         ctx.check(f"two exec invocations, got {len(lines)}", len(lines) == 2)
         ctx.check(f"first call has no resume, got {lines[0]}", "resume" not in lines[0])
         ctx.check(f"second call resumes, got {lines[1]}", "resume" in lines[1])
+        text = "".join(e.data.get("text", "") for e in second if e.kind == "text_delta")
+        ctx.check("reused item ids do not hide the next reply", text.strip() == "pong")
         session.close_cc()
 
 
@@ -252,19 +254,170 @@ def test_out_of_credits_fails_over_to_the_next_account(ctx: Ctx):
 
 
 @test
-def test_out_of_credits_after_a_command_waits_for_continue(ctx: Ctx):
+def test_out_of_credits_after_a_command_continues_saved_work(ctx: Ctx):
     from halo_harness.accounts import active_account_name
     log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
     with _fake_codex_env(argv_log=log_path):
         session, _ = _new_cx_session()
         _codex_accounts(session, "a", "b", out_of_credits=("a",))
-        evs = list(session.turn("NATIVE_CMD then reply with the single word pong"))
-        ctx.check(f"asks for an explicit continue, got {_errors(evs)}",
-                  [t for t, _ in _errors(evs)] == ["cx_failover_needs_continue"])
-        ctx.check("the command is not re-run automatically", len(_exec_calls(log_path)) == 1)
-        ctx.check("account b is active for the continue", active_account_name("codex", state_dir=session.state_dir) == "b")
-        follow = list(session.turn("continue, and reply with the single word pong"))
-        ctx.check(f"continue works on the new account, got {_errors(follow)}", not _errors(follow))
+        marker = session.cwd / "completed-action.txt"
+        request = f"NATIVE_CMD NATIVE_WRITE:{marker} then reply with the single word pong"
+        evs = list(session.turn(request))
+        ctx.check(f"automatically continues without an error, got {_errors(evs)}", not _errors(evs))
+        calls = _exec_calls(log_path)
+        ctx.check("two account attempts in the same turn", len(calls) == 2)
+        continuation = calls[1][-1]
+        ctx.check("handoff includes the original request and real tool output",
+                  request in continuation and "\nhi\n" in continuation)
+        ctx.check("handoff is a continuation, not a replay instruction",
+                  "Do not restart the task or repeat completed actions" in continuation)
+        ctx.check("the fixture's completed write is not repeated", marker.read_text() == "completed-once\n")
+        ctx.check("only one tool execution is shown", sum(e.kind == "tool_result" for e in evs) == 1)
+        ctx.check("account b is active", active_account_name("codex", state_dir=session.state_dir) == "b")
+        ctx.check("one successful terminal event",
+                  [e.data["reason"] for e in evs if e.kind == "turn_done"] == ["end_turn"])
+        session.close_cc()
+
+
+@test
+def test_account_recovery_keeps_images_and_distinct_tool_results(ctx: Ctx):
+    import base64
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b", out_of_credits=("a",))
+        images = [{"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                   "data": base64.b64encode(b"test-image").decode()}}]
+        first = list(session.turn("NATIVE_CMD EXPECT_IMAGE then reply pong", images=images))
+        ctx.check("both accounts received a usable attachment path", not _errors(first))
+        calls = _exec_calls(log_path)
+        ctx.check("images passed to each account", len(calls) == 2 and all("-i" in call for call in calls))
+        paths = [Path(call[call.index("-i") + 1]) for call in calls]
+        ctx.check("temporary images cleaned up", all(not path.exists() for path in paths))
+        second = list(session.turn("NATIVE_CMD then reply pong"))
+        ctx.check("next turn also succeeds", not _errors(second))
+        results = [n for n in session.log.nodes() if n.get("type") == "tool_result"]
+        ctx.check("reused Codex item ids get distinct transcript results",
+                  len(results) == 2 and len({n["tool_use_id"] for n in results}) == 2)
+        session.close_cc()
+
+
+@test
+def test_failover_waits_for_a_bridge_call_that_is_still_being_correlated(ctx: Ctx):
+    from unittest.mock import patch
+    from halo_harness.agent import codex_runtime
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b", out_of_credits=("a",))
+        codex_runtime.ensure_cx_state(session)
+        marker = session.cwd / "bridge-result.txt"
+        marker.write_text("bridge result before account handoff")
+        entered = threading.Event()
+        release = threading.Event()
+        original = codex_runtime._take_tool_use_id
+        def delayed_id(*args):
+            entered.set()
+            release.wait(timeout=3)
+            return original(*args)
+        with patch.object(codex_runtime, "_take_tool_use_id", delayed_id), \
+             patch.object(codex_runtime, "_TOOL_USE_ID_WAIT_S", 0.01):
+            worker = threading.Thread(target=lambda: codex_runtime.bridge_call_tool(
+                session, "Read", {"file_path": str(marker)}), daemon=True)
+            worker.start()
+            ctx.check("bridge call has entered correlation", entered.wait(timeout=2))
+            timer = threading.Timer(0.8, release.set)
+            timer.start()
+            try:
+                evs = list(session.turn("reply pong"))
+            finally:
+                release.set()
+                timer.cancel()
+                worker.join(timeout=3)
+        ctx.check("account recovery succeeded", not _errors(evs))
+        ctx.check("handoff waited for and included the real bridge result",
+                  "bridge result before account handoff" in _exec_calls(log_path)[1][-1])
+        session.close_cc()
+
+
+@test
+def test_failover_carries_unknown_tool_outcome_before_continuing(ctx: Ctx):
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b", out_of_credits=("a",))
+        evs = list(session.turn("NATIVE_CMD NATIVE_UNFINISHED then reply pong"))
+        ctx.check("unknown outcome does not require manual continue", not _errors(evs))
+        continuation = _exec_calls(log_path)[1][-1]
+        ctx.check("the next account sees uncertainty before it acts",
+                  "Tool outcome unknown after account interruption; inspect current state before retrying." in continuation)
+        results = [n for n in session.log.nodes() if n.get("type") == "tool_result"]
+        ctx.check("unfinished native call gets one result", len(results) == 1 and results[0]["is_error"])
+        session.close_cc()
+
+
+@test
+def test_failover_retries_a_logged_in_profile_despite_cached_exhaustion(ctx: Ctx):
+    from halo_harness.accounts import codex_profile
+    from halo_harness.providers.cx_models import record_rate_limits
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b", out_of_credits=("a",))
+        profile = codex_profile("b", state_dir=session.state_dir)
+        record_rate_limits({"primary": {"usedPercent": 100, "resetsAt": time.time() + 3600}}, profile.profile_dir)
+        evs = list(session.turn("reply with the single word pong"))
+        ctx.check("the actual usable account wins over its cached limit", not _errors(evs))
+        ctx.check("each account tried once", len(_exec_calls(log_path)) == 2)
+        session.close_cc()
+
+
+@test
+def test_stderr_only_credit_failure_also_switches_account(ctx: Ctx):
+    from halo_harness.accounts import codex_profile
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b")
+        profile = codex_profile("a", state_dir=session.state_dir)
+        (profile.config_home / "fake-credits-on-stderr").touch()
+        evs = list(session.turn("reply with the single word pong"))
+        ctx.check(f"stderr quota errors also recover, got {_errors(evs)}", not _errors(evs))
+        ctx.check("the next account was used", len(_exec_calls(log_path)) == 2)
+        text = "".join(e.data.get("text", "") for e in evs if e.kind == "text_delta")
+        ctx.check("the reply arrived", text.strip() == "pong")
+        session.close_cc()
+
+
+@test
+def test_cancel_at_account_handoff_does_not_start_the_next_request(ctx: Ctx):
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b", out_of_credits=("a",))
+        collected = []
+        for ev in session.turn("reply pong"):
+            collected.append(ev)
+            if ev.kind == "notification" and "continuing saved work" in str(ev.data):
+                session.abort.set()
+        ctx.check("cancel prevented a second exec", len(_exec_calls(log_path)) == 1)
+        ctx.check("the turn was interrupted", collected[-1].data["reason"] == "interrupted")
+        session.close_cc()
+
+
+@test
+def test_failover_exhausts_each_account_once_and_explains_limits(ctx: Ctx):
+    log_path = Path(tempfile.mkdtemp(prefix="cx-argvlog-")) / "argv.jsonl"
+    with _fake_codex_env(argv_log=log_path):
+        session, _ = _new_cx_session()
+        _codex_accounts(session, "a", "b", "c", out_of_credits=("a", "b", "c"))
+        evs = list(session.turn("reply with the single word pong"))
+        errors = _errors(evs)
+        ctx.check("bounded to three attempts", len(_exec_calls(log_path)) == 3)
+        ctx.check(f"accurate exhaustion diagnostic: {errors}",
+                  len(errors) == 1 and "All configured Codex accounts were tried" in errors[0][1]
+                  and "no other logged-in" not in errors[0][1])
+        ctx.check("exactly one terminal event", sum(e.kind == "turn_done" for e in evs) == 1)
         session.close_cc()
 
 

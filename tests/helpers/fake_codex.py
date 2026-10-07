@@ -43,6 +43,7 @@ invocation -- lets a test assert the exact argv a real caller built.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
 import re
@@ -51,6 +52,7 @@ import time
 import uuid
 
 _THREAD_REGISTRY_ENV = "FAKE_CODEX_THREAD_REGISTRY"  # path, optional: tracks resumed ids
+_ITEM_IDS = itertools.count()
 
 
 def _write(obj: dict) -> None:
@@ -78,7 +80,7 @@ def _cmd_login_status() -> int:
 def _parse_exec_argv(argv: "list[str]") -> dict:
     """`argv` is everything after `exec` (e.g. `["resume", "<id>", "--json",
     ..., "<prompt>"]`)."""
-    opts = {"resume_id": None, "model": None, "mcp": {"command": None, "args": [], "env_vars": []}, "prompt": ""}
+    opts = {"resume_id": None, "model": None, "mcp": {"command": None, "args": [], "env_vars": []}, "prompt": "", "images": []}
     i = 0
     if argv and argv[0] == "resume":
         opts["resume_id"] = argv[1] if len(argv) > 1 else None
@@ -110,6 +112,8 @@ def _parse_exec_argv(argv: "list[str]") -> dict:
                              "For more information, try '--help'.\n")
             sys.exit(2)
         if a == "-s" or a == "-i" or a == "-o":
+            if a == "-i":
+                opts["images"].append(argv[i + 1])
             i += 2
             continue
         positional.append(a)
@@ -136,7 +140,7 @@ async def _call_tool(name: str, args: dict, mcp_cfg: dict):
 
 
 def _next_item_id() -> str:
-    return f"item_{uuid.uuid4().hex[:8]}"
+    return f"item_{next(_ITEM_IDS)}"
 
 
 def _account_file(name: str) -> "str | None":
@@ -145,6 +149,10 @@ def _account_file(name: str) -> "str | None":
 
 
 async def _run_exec(opts: dict) -> int:
+    stderr_limit = _account_file("fake-credits-on-stderr")
+    if stderr_limit and os.path.exists(stderr_limit):
+        sys.stderr.write("Your workspace is out of credits. Add credits to continue.\n")
+        return 1
     threads_path = _account_file("fake-threads")
     if threads_path and opts["resume_id"]:
         try:
@@ -163,14 +171,25 @@ async def _run_exec(opts: dict) -> int:
     _write({"type": "turn.started"})
 
     prompt = opts["prompt"]
-    if "NATIVE_CMD" in prompt:
+    if "EXPECT_IMAGE" in prompt:
+        if not opts["images"] or any(not os.path.isfile(path) for path in opts["images"]):
+            _write({"type": "turn.failed", "error": {"message": "missing image attachment"}})
+            return 1
+    recovering = "<request-to-continue>" in prompt and "Do not restart the task or repeat completed actions" in prompt
+    if "NATIVE_CMD" in prompt and not recovering:
         cmd_id = _next_item_id()
         command = "/bin/bash -lc 'echo hi'"
+        write = re.search(r"NATIVE_WRITE:(\S+)", prompt)
+        if write:
+            with open(write.group(1), "a", encoding="utf-8") as f:
+                f.write("completed-once\n")
+            command = f"append completed marker to {write.group(1)}"
         _write({"type": "item.started", "item": {"id": cmd_id, "type": "command_execution", "command": command,
                                                     "aggregated_output": "", "status": "in_progress"}})
-        _write({"type": "item.completed", "item": {"id": cmd_id, "type": "command_execution", "command": command,
-                                                      "aggregated_output": "hi\n", "exit_code": 0,
-                                                      "status": "completed"}})
+        if "NATIVE_UNFINISHED" not in prompt:
+            _write({"type": "item.completed", "item": {"id": cmd_id, "type": "command_execution", "command": command,
+                                                          "aggregated_output": "hi\n", "exit_code": 0,
+                                                          "status": "completed"}})
     out_of_credits = _account_file("fake-out-of-credits")
     if out_of_credits and os.path.exists(out_of_credits):
         message = "Your workspace is out of credits. Add credits to continue."
@@ -186,7 +205,7 @@ async def _run_exec(opts: dict) -> int:
     error_m = re.search(r"ERROR:(\S+)", prompt)
     tool_m = re.search(r"TOOL:([A-Za-z0-9_]+):(\{.*\})(?:$|\s)", prompt)
 
-    if tool_m and opts["mcp"]["command"]:
+    if tool_m and opts["mcp"]["command"] and not recovering:
         name, args_json = tool_m.group(1), tool_m.group(2)
         call_id = _next_item_id()
         try:

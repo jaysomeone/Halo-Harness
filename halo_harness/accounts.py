@@ -180,14 +180,23 @@ def _profile_limit_is_active(profile: AccountProfile, *, now: Optional[float] = 
               (not isinstance(w.get("resets_at"), (int, float)) or w.get("resets_at") > now)]
     if any(isinstance(w.get("used_percent"), (int, float)) and w["used_percent"] >= 100 for w in active):
         return True
-    return bool(limits.get("reached") and active)
+    # A reached primary window must not borrow a still-open secondary
+    # window's reset time. Workspace credit errors have no window reset
+    # semantics; a cached one cannot prove today's balance is exhausted.
+    reached = limits.get("reached")
+    return reached in ("primary", "secondary") and limits.get(reached) in active
 
 
 def next_codex_profile(current_name: Optional[str], *, state_dir: Optional[Path] = None,
                        login_status: Optional[Callable] = None, now: Optional[float] = None,
                        base_env: Optional[dict] = None,
                        excluded_names: Optional[set[str]] = None) -> Optional[AccountProfile]:
-    """Find another logged-in, non-exhausted Codex profile, rotating from current."""
+    """Find another subscription login, preferring apparently available profiles.
+
+    Cached limits are advisory: a top-up, reset, or credit-backed request
+    can make a profile usable again. Try cached-exhausted profiles last,
+    once per turn, before concluding that every account is unavailable.
+    """
     from halo_harness.providers.cx_models import codex_login_status, is_subscription_login
     profiles = list_account_profiles(state_dir=state_dir)
     if not profiles:
@@ -198,12 +207,30 @@ def next_codex_profile(current_name: Optional[str], *, state_dir: Optional[Path]
         profiles = profiles[pos:] + profiles[:pos]
     check = login_status or codex_login_status
     excluded = set(excluded_names or ())
+    profiles.sort(key=lambda p: _profile_limit_is_active(p, now=now))
     for profile in profiles:
-        if profile.name == current_name or profile.name in excluded or _profile_limit_is_active(profile, now=now):
+        if profile.name == current_name or profile.name in excluded:
             continue
         if is_subscription_login(check(env=codex_profile_env(profile, base_env))):
             return profile
     return None
+
+
+def codex_failover_unavailable_message(attempted_names: set[str], *,
+                                      state_dir: Optional[Path] = None) -> str:
+    """Explain exhausted logins separately from missing/unusable profiles."""
+    names = {p.name for p in list_account_profiles(state_dir=state_dir)}
+    if names and names <= attempted_names:
+        attempted = ", ".join(sorted(names))
+        return (f"All configured Codex accounts were tried this turn ({attempted}) and reported usage/credit limits. "
+                "Work is saved; continue after an account resets or has credits available, "
+                "or add another subscription with /accounts add codex <name>.")
+    if names - attempted_names:
+        unavailable = ", ".join(sorted(names - attempted_names))
+        return (f"Other configured Codex profiles could not provide a verified ChatGPT login ({unavailable}). "
+                "Check /accounts and their login status. Work is saved.")
+    return ("No other Codex subscription profile is configured. Work is saved; "
+            "add one with /accounts add codex <name>.")
 
 
 def add_codex_account(name: str, *, state_dir: Optional[Path] = None,

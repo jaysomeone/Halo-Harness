@@ -118,7 +118,7 @@ def test_profile_env_keeps_accounts_separate(ctx: Ctx):
 
 
 @test
-def test_fallback_skips_current_unlogged_and_exhausted_profiles(ctx: Ctx):
+def test_fallback_prefers_available_but_rechecks_cached_exhausted_profiles(ctx: Ctx):
     from halo_harness.providers.cx_models import record_rate_limits
 
     state = Path(tempfile.mkdtemp(prefix="accounts-state-"))
@@ -134,9 +134,41 @@ def test_fallback_skips_current_unlogged_and_exhausted_profiles(ctx: Ctx):
 
     chosen = next_codex_profile("a", state_dir=state, login_status=fake_status, now=1000, base_env={})
     ctx.check("next available same-provider account selected", chosen == available)
+    last_chance = next_codex_profile("a", state_dir=state, login_status=fake_status, now=1000, base_env={},
+                                     excluded_names={"c"})
+    ctx.check("cached limit cannot permanently exclude a logged-in account", last_chance == exhausted)
     none_left = next_codex_profile("a", state_dir=state, login_status=fake_status, now=1000, base_env={},
-                                   excluded_names={"c"})
-    ctx.check("already attempted account is not selected again", none_left is None)
+                                   excluded_names={"b", "c"})
+    ctx.check("already attempted accounts are never selected again", none_left is None)
+
+
+@test
+def test_expired_primary_limit_does_not_borrow_secondary_reset(ctx: Ctx):
+    from halo_harness.accounts import _profile_limit_is_active
+    from halo_harness.providers.cx_models import record_rate_limits
+    state = Path(tempfile.mkdtemp(prefix="accounts-state-"))
+    profile = prepare_codex_profile("a", state_dir=state)
+    for reached in ("primary", "workspace_owner_credits_depleted"):
+        record_rate_limits({"rateLimitReachedType": reached,
+                            "primary": {"usedPercent": 100, "resetsAt": 900},
+                            "secondary": {"usedPercent": 32, "resetsAt": 2000}}, profile.profile_dir)
+        ctx.check(f"expired primary is not blocked by secondary for {reached}",
+                  not _profile_limit_is_active(profile, now=1000))
+    record_rate_limits({"primary": {"usedPercent": 100, "resetsAt": 1100}}, profile.profile_dir)
+    ctx.check("a genuinely active window remains a deprioritization signal",
+              _profile_limit_is_active(profile, now=1000))
+
+
+@test
+def test_fallback_never_uses_logged_out_or_api_key_profiles(ctx: Ctx):
+    state = Path(tempfile.mkdtemp(prefix="accounts-state-"))
+    for name in ("a", "api", "logged-out", "subscription"):
+        prepare_codex_profile(name, state_dir=state)
+    def status(*, env):
+        name = Path(env["CODEX_HOME"]).parent.name
+        return CodexLoginStatus(name != "logged-out", method="api_key" if name == "api" else "chatgpt")
+    selected = next_codex_profile("a", state_dir=state, login_status=status, base_env={})
+    ctx.check("only the other verified subscription is selected", selected.name == "subscription")
 
 
 @test

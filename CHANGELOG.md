@@ -10,6 +10,16 @@ version.
 
 ## [2.0.3] - unreleased
 
+**Local Codex account recovery fix (2026-10-07):** Automatically continue
+after a subscription limit even when the turn already ran tools, carrying
+the request, attachments, and saved tool results to the next account.
+Stop the failed subprocess before switching and mark unfinished tool
+outcomes for inspection. Cached usage limits now prioritize accounts
+instead of excluding them; expired primary limits cannot borrow a
+secondary window's reset time. Try each subscription profile once per
+turn and distinguish exhausted accounts from missing logins. No API
+billing fallback is introduced.
+
 Local and cloud models: Ollama + Hugging Face (`plans/2.0.3-ollama-round2-brief.md`
 and onward). Rounds 1-5 (research, the `ol:` provider, hardware/host
 analysis and roles, the `hf:` route, and `hf:local/*`/the shared `/local`

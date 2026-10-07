@@ -60,8 +60,8 @@ class CxState:
     preamble_sent: bool = False
     # codex_turn._events_for_cx_obj's own incremental-text bookkeeping: how
     # many chars of each live `agent_message`/`reasoning` item's text have
-    # already been emitted as a delta, keyed by item id -- reset per
-    # subprocess call is unnecessary (item ids are UUIDs, never reused).
+    # already been emitted as a delta, keyed by item id. Reset for each
+    # subprocess because a new thread can reuse item ids.
     cx_text_lens: dict = field(default_factory=dict)
     cx_thinking_lens: dict = field(default_factory=dict)
     account_name: Optional[str] = None
@@ -160,7 +160,7 @@ def _follow_active_account(session, state: CxState) -> bool:
 
 
 def switch_to_next_codex_account(session, state: CxState, *, excluded_names: set) -> Optional[str]:
-    """Make the next logged-in, non-exhausted Codex account active for this
+    """Make the next logged-in Codex account active for this
     session; the next `codex exec` starts a fresh thread under it. Returns
     the new account's name, or None when there is no other account."""
     from halo_harness.accounts import next_codex_profile, set_active_account
@@ -279,15 +279,19 @@ def bridge_call_tool(session, name: str, arguments: dict) -> dict:
     tool`; wrapped so an internal crash still produces a real (is_error)
     reply and a logged tool_result, never an unpaired tool_use."""
     tool_input = arguments or {}
-    tool_use_id = _take_tool_use_id(session, name, tool_input)
-    turn_no = session.turn_count
-    _log_tool_use(session, tool_use_id, name, tool_input)
-    _emit(session, events.Event("tool_use_ready", {"id": tool_use_id, "name": name, "input": tool_input,
-                                                      "repaired": False}, turn=turn_no))
     state: CxState = session._cx_state
+    # Correlating an announcement can itself block. Recovery must see the
+    # call as in flight from entry, before it can start any side effects.
+    flight_id = f"cxbridge_{_uuid_mod.uuid4().hex}"
+    tool_use_id = flight_id
+    turn_no = session.turn_count
     with state.lock:
-        state.in_flight.add(tool_use_id)
+        state.in_flight.add(flight_id)
     try:
+        tool_use_id = _take_tool_use_id(session, name, tool_input)
+        _log_tool_use(session, tool_use_id, name, tool_input)
+        _emit(session, events.Event("tool_use_ready", {"id": tool_use_id, "name": name, "input": tool_input,
+                                                          "repaired": False}, turn=turn_no))
         return _resolve_and_dispatch_bridged_call(session, turn_no, tool_use_id, name, tool_input)
     except Exception as e:
         log.exception("codex bridge_call_tool: dispatch failed for %s", name)
@@ -302,7 +306,7 @@ def bridge_call_tool(session, name: str, arguments: dict) -> dict:
         return _wire_result(text, True)
     finally:
         with state.lock:
-            state.in_flight.discard(tool_use_id)
+            state.in_flight.discard(flight_id)
 
 
 def record_tool_use_announcement(session, *, tool_use_id: str, name: str, tool_input: dict) -> None:

@@ -31,6 +31,7 @@ from halo_harness.agent.codex_runtime import (
 
 _ABORT_POLL_S = 0.05
 _KILL_GRACE_S = 3.0
+_FAILOVER_TOOL_WAIT_S = 30.0
 # cc_process.py's own command-line-length finding applies here too (a real
 # subprocess argv, not a pipe) -- a long preamble/steer chain is capped
 # well under the practical Windows argv budget rather than risking "the
@@ -85,7 +86,10 @@ def _cx_preamble(session) -> str:
 
 
 _FAILOVER_CONTINUE = ("The previous Codex account reached its usage limit partway through this turn. "
-                      "Continue the user's latest request from where the conversation above left off.")
+                      "Continue the provided user request from the saved conversation and tool results. "
+                      "Do not restart the task or repeat completed actions. Some tools may already have "
+                      "changed files or external state. If a tool's outcome is unknown, inspect the "
+                      "current state before deciding whether anything needs retrying.")
 
 
 def _conversation_before_this_turn(session) -> str:
@@ -262,7 +266,9 @@ def _events_for_cx_obj(session, turn_no: int, obj: dict, state) -> "tuple[list, 
             name, args = _item_mcp_call_name_and_args(item)
             if typ == "item.started" and name:
                 state.tools_ran = True
-                announce_id = item_id or f"cx_{_uuid_mod.uuid4().hex[:8]}"
+                # Codex item ids are local to a subprocess/thread; Halo's
+                # transcript ids must stay unique across account switches.
+                announce_id = f"cx_mcp_{_uuid_mod.uuid4().hex}"
                 record_tool_use_announcement(session, tool_use_id=announce_id, name=name, tool_input=args)
             # item.completed for this type is NOT logged here -- the real
             # tools/call already landed on the bridge and was logged by
@@ -276,7 +282,7 @@ def _events_for_cx_obj(session, turn_no: int, obj: dict, state) -> "tuple[list, 
             state.tools_ran = True
             synth_id = state.native_started.get(item_id)
             if synth_id is None:
-                synth_id = f"cx_native_{item_id or _uuid_mod.uuid4().hex[:8]}"
+                synth_id = f"cx_native_{_uuid_mod.uuid4().hex}"
                 if item_id:
                     state.native_started[item_id] = synth_id
                 session.log.append_assistant(content=[{"type": "tool_use", "id": synth_id, "name": itype,
@@ -327,6 +333,10 @@ def _run_one_cx_subprocess(session, state, turn_no: int, prompt: str, image_path
         session.log.append_user([{"type": "text", "text": prompt}], kind="steer")
     state.limit_message, state.tools_ran = None, False
     state.native_started.clear()
+    state.cx_text_lens.clear()
+    state.cx_thinking_lens.clear()
+    with state.lock:
+        state.pending_tool_uses.clear()
 
     bridge_env = state.bridge.child_env()
     mcp_args = build_mcp_override_args(list(bridge_env.keys()))
@@ -397,6 +407,8 @@ def _run_one_cx_subprocess(session, state, turn_no: int, prompt: str, image_path
                 break
             if item == "EOF":
                 tail = process.stderr_tail()
+                if not state.limit_message and _is_usage_limit(tail):
+                    state.limit_message = tail.strip().splitlines()[-1][:300]
                 if state.limit_message:
                     reason = "rate_limited"
                     break
@@ -422,8 +434,15 @@ def _run_one_cx_subprocess(session, state, turn_no: int, prompt: str, image_path
                 break
     finally:
         turn_finished.set()
+        # A failed response can arrive before the child exits. Stop it
+        # before another account is allowed to act on the same workspace.
+        if process.wait(timeout=5.0) is None:
+            process.interrupt()
+            if process.wait(timeout=_KILL_GRACE_S) is None:
+                process.kill()
+                process.wait(timeout=2.0)
+        reader_thread.join(timeout=2.0)
         state.active_queue = None
-        process.wait(timeout=5.0)
     return reason
 
 
@@ -466,6 +485,7 @@ def turn_body_cx(session, turn_no: int, text: str, *, images: Optional[list] = N
             context_texts.append(prior)
 
     pending_text = text
+    request_to_continue = text
     pending_images = images
     log_kind = None
     overall_reason = "end_turn"
@@ -475,6 +495,9 @@ def turn_body_cx(session, turn_no: int, text: str, *, images: Optional[list] = N
     attempted_accounts = {state.account_name} if state.account_name else set()
     try:
         while True:
+            if session.abort.is_set():
+                overall_reason = "interrupted"
+                break
             parts = list(context_texts) if first_iteration else []
             if not state.preamble_sent:
                 state.preamble_sent = True
@@ -506,29 +529,48 @@ def turn_body_cx(session, turn_no: int, text: str, *, images: Optional[list] = N
                 continue
             if reason == "rate_limited":
                 from halo_harness.agent.codex_runtime import switch_to_next_codex_account
-                limit_message, had_tools = state.limit_message, state.tools_ran
+                from halo_harness.accounts import codex_failover_unavailable_message
+                from halo_harness.agent.invariants import synthesize_missing_results
+                # Finish any tool still executing through Halo's bridge
+                # before handing its transcript to a fresh model thread.
+                deadline = time.monotonic() + _FAILOVER_TOOL_WAIT_S
+                while True:
+                    with state.lock:
+                        running = bool(state.in_flight)
+                    if not running or session.abort.is_set() or time.monotonic() >= deadline:
+                        break
+                    time.sleep(_ABORT_POLL_S)
+                if session.abort.is_set():
+                    overall_reason = "interrupted"
+                    break
+                if running:
+                    yield events.error("Codex account recovery is paused because a tool is still running. "
+                                       "Let that tool finish before continuing.",
+                                       turn=turn_no, err_type="cx_failover_tool_running")
+                    overall_reason = "error"
+                    break
+                synthesize_missing_results(
+                    session.log, reason="Tool outcome unknown after account interruption; inspect current state before retrying.")
+                limit_message = state.limit_message
                 next_name = switch_to_next_codex_account(session, state, excluded_names=attempted_accounts)
                 if next_name is None:
-                    yield events.error(f"{limit_message} -- no other logged-in Codex account is available "
-                                       f"(add one with /accounts add codex <name>).",
+                    detail = codex_failover_unavailable_message(
+                        attempted_accounts, state_dir=getattr(session, "state_dir", None))
+                    yield events.error(f"{limit_message} -- {detail}",
                                        turn=turn_no, err_type="cx_usage_exhausted")
                     overall_reason = "error"
                     break
                 attempted_accounts.add(next_name)
                 yield events.notification(f"Codex account limit reached ({limit_message}) -- "
-                                          f"switched to Codex account {next_name!r}.")
-                if had_tools:
-                    yield events.error("Halo did not repeat this turn automatically because it already ran a tool. "
-                                       "Send `continue` to pick up on the new account.",
-                                       turn=turn_no, err_type="cx_failover_needs_continue")
-                    overall_reason = "error"
-                    break
+                                          f"switched to Codex account {next_name!r}; continuing saved work automatically.")
                 # A fresh thread on the new account: everything so far,
                 # including this turn's own message, rides along.
                 from halo_harness.agent.cc_runtime import _render_conversation_so_far
                 context_texts = [c for c in (_render_conversation_so_far(session),) if c]
-                pending_text = _FAILOVER_CONTINUE
-                pending_images = None
+                pending_text = ("<request-to-continue>\n" + request_to_continue
+                                + "\n</request-to-continue>\n\n" + _FAILOVER_CONTINUE)
+                # Re-materialize the original attachments for the new
+                # account; transcript text cannot substitute for images.
                 first_iteration = True
                 state.preamble_sent = False
                 log_kind = None
@@ -539,6 +581,7 @@ def turn_body_cx(session, turn_no: int, text: str, *, images: Optional[list] = N
             if not queued:
                 break
             pending_text = "\n\n".join(queued)
+            request_to_continue = pending_text
             pending_images = None
             log_kind = "steer"
     finally:

@@ -176,6 +176,9 @@ class CodexExecProcess:
         while True:
             line = stdout.readline()
             if line == "":
+                # stderr drains independently; capture a final quota error
+                # before the caller decides whether EOF can fail over.
+                self._stderr_thread.join(timeout=0.2)
                 return None
             line = line.strip()
             if not line:
